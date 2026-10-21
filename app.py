@@ -14,7 +14,7 @@ except ImportError:
     pass
 
 # ================= 1. THEME & INSTITUTIONAL STYLING =================
-st.set_page_config(page_title="Knowledge Hub — Dhan Institutional Terminal", layout="wide", page_icon="⚡")
+st.set_page_config(page_title="Knowledge Hub", layout="wide", page_icon="⚡")
 
 st.markdown("""
 <style>
