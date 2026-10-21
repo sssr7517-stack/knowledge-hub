@@ -5,3 +5,4 @@ requests
 plotly
 pytz
 streamlit-autorefresh
+dhanhq>=2.1.0
