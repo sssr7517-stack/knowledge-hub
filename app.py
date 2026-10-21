@@ -57,12 +57,12 @@ st.markdown("""
     .badge-sell { background: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid #ef4444; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 700; }
     .badge-strat { background: #1e293b; color: #38bdf8; border: 1px solid #0284c7; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
     .login-box {
-        max-width: 500px;
-        margin: 60px auto;
+        max-width: 520px;
+        margin: 40px auto;
         background: #0d131f;
         border: 1px solid #26334d;
         border-radius: 14px;
-        padding: 30px;
+        padding: 28px;
         box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
     }
 </style>
@@ -82,7 +82,6 @@ GOOGLE_SHEET_URL = st.secrets.get("GOOGLE_SHEET_URL", "").strip()
 def init_db():
     conn = sqlite3.connect("knowledge_hub.db")
     c = conn.cursor()
-    # Users table
     c.execute("""
         CREATE TABLE IF NOT EXISTS access_users (
             phone TEXT PRIMARY KEY,
@@ -93,7 +92,6 @@ def init_db():
             request_time TEXT
         )
     """)
-    # Alerts table
     c.execute("""
         CREATE TABLE IF NOT EXISTS alerts_v4 (
             alert_id TEXT PRIMARY KEY,
@@ -163,89 +161,97 @@ def poll_telegram_approvals():
                         requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery", 
                                       json={"callback_query_id": cb_id, "text": f"✅ Access Approved for {target_phone}!"})
                     
-                    # Offset Telegram update so it isn't processed twice
                     requests.get(url, params={"offset": update_id + 1}, timeout=2)
     except:
         pass
 
 poll_telegram_approvals()
 
-# ================= 4. AUTHENTICATION & ACCESS GATEWAY =================
+# ================= 4. AUTHENTICATION & ACCESS GATEWAY (FIXED) =================
 if "authenticated_user" not in st.session_state:
     st.session_state.authenticated_user = None
 
 if not st.session_state.authenticated_user:
     st.markdown("<div class='login-box'>", unsafe_allow_html=True)
     st.markdown("<h2 style='color:#38bdf8; text-align:center;'>🔒 Knowledge Hub Terminal</h2>", unsafe_allow_html=True)
-    st.caption("<div style='text-align:center; color:#94a3b8; margin-bottom:20px;'>Institutional Access Request Portal</div>", unsafe_allow_html=True)
+    st.caption("<div style='text-align:center; color:#94a3b8; margin-bottom:18px;'>Personal Institutional Access Request</div>", unsafe_allow_html=True)
 
-    with st.form("login_form"):
-        u_name = st.text_input("Full Name *")
-        u_phone = st.text_input("Phone Number (10 digits) *")
-        u_email = st.text_input("Email Address *")
-        u_segment = st.selectbox("Preferred Trading Segment", ["NIFTY / BANKNIFTY Options", "SENSEX Derivatives", "Stock Options", "Equity Cash"])
-        submit_req = st.form_submit_button("Request Terminal Access")
+    tab_req, tab_chk = st.tabs(["📝 Request Access", "🔑 Check Status / Unlock"])
 
-        if submit_req:
-            if not u_name or not u_phone or not u_email or len(u_phone) < 10:
-                st.error("Please fill in all details with a valid phone number.")
-            else:
-                save_user_request(u_name, u_phone, u_email, u_segment)
+    # FORM 1: New Access Request
+    with tab_req:
+        with st.form("new_request_form"):
+            u_name = st.text_input("Full Name *")
+            u_phone = st.text_input("WhatsApp / Phone Number (10 digits) *")
+            u_email = st.text_input("Email Address *")
+            u_segment = st.selectbox("Preferred Trading Segment", ["NIFTY / BANKNIFTY Options", "SENSEX Derivatives", "Stock Options", "Equity Cash"])
+            
+            submit_req = st.form_submit_button("Submit Access Request")
 
-                # 1. Append directly to Google Sheet CRM
-                if GOOGLE_SHEET_URL:
-                    try:
-                        requests.post(GOOGLE_SHEET_URL, json={
-                            "name": u_name,
-                            "phone": u_phone,
-                            "email": u_email,
-                            "segment": u_segment
-                        }, timeout=4)
-                    except:
-                        pass
+            if submit_req:
+                if not u_name or not u_phone or not u_email or len(u_phone) < 10:
+                    st.error("Please fill in all fields with a valid 10-digit phone number.")
+                else:
+                    save_user_request(u_name, u_phone, u_email, u_segment)
 
-                # 2. Fire interactive Authorization Request to YOUR Telegram
-                if BOT_TOKEN and CHAT_ID:
-                    tg_msg = (
-                        f"🚨 <b>NEW TERMINAL ACCESS REQUEST</b> 🚨\n\n"
-                        f"👤 <b>Name:</b> {u_name}\n"
-                        f"📱 <b>Phone:</b> <code>{u_phone}</code>\n"
-                        f"✉️ <b>Email:</b> {u_email}\n"
-                        f"📊 <b>Segment:</b> {u_segment}\n"
-                        f"🕒 <b>Time:</b> {now_ist.strftime('%I:%M:%S %p')} IST"
-                    )
-                    payload = {
-                        "chat_id": CHAT_ID,
-                        "text": tg_msg,
-                        "parse_mode": "HTML",
-                        "reply_markup": {
-                            "inline_keyboard": [
-                                [
-                                    {"text": "✅ Grant Access", "callback_data": f"AUTH_YES_{u_phone}"},
-                                    {"text": "❌ Reject", "callback_data": f"AUTH_NO_{u_phone}"}
+                    # 1. Sync to Google Sheets
+                    if GOOGLE_SHEET_URL:
+                        try:
+                            requests.post(GOOGLE_SHEET_URL, json={
+                                "name": u_name,
+                                "phone": u_phone,
+                                "email": u_email,
+                                "segment": u_segment
+                            }, timeout=4)
+                        except:
+                            pass
+
+                    # 2. Dispatch Interactive Approval to Telegram
+                    if BOT_TOKEN and CHAT_ID:
+                        tg_msg = (
+                            f"🚨 <b>NEW TERMINAL ACCESS REQUEST</b> 🚨\n\n"
+                            f"👤 <b>Name:</b> {u_name}\n"
+                            f"📱 <b>Phone:</b> <code>{u_phone}</code>\n"
+                            f"✉️ <b>Email:</b> {u_email}\n"
+                            f"📊 <b>Segment:</b> {u_segment}\n"
+                            f"🕒 <b>Time:</b> {now_ist.strftime('%I:%M:%S %p')} IST"
+                        )
+                        payload = {
+                            "chat_id": CHAT_ID,
+                            "text": tg_msg,
+                            "parse_mode": "HTML",
+                            "reply_markup": {
+                                "inline_keyboard": [
+                                    [
+                                        {"text": "✅ Grant Access", "callback_data": f"AUTH_YES_{u_phone}"},
+                                        {"text": "❌ Reject", "callback_data": f"AUTH_NO_{u_phone}"}
+                                    ]
                                 ]
-                            ]
+                            }
                         }
-                    }
-                    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json=payload, timeout=4)
+                        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json=payload, timeout=4)
 
-                st.info("Request submitted! Your access approval has been dispatched to the Administrator's Telegram.")
+                    st.success("Request sent! An approval alert has been dispatched to the Administrator's Telegram.")
 
-        # Check existing status
-        check_phone = st.text_input("Already requested? Enter phone number to check status:", key="chk_ph")
-        if st.button("Verify Access Status"):
-            stat = check_user_status(check_phone)
-            if stat and stat[0] == "APPROVED":
-                st.session_state.authenticated_user = stat[1]
-                st.success("Access Approved! Welcome.")
-                st.rerun()
-            elif stat and stat[0] == "PENDING":
-                st.warning("Access Pending. Administrator has not approved yet. Please check back shortly.")
-            else:
-                st.error("No request found for this number.")
+    # FORM 2: Verification (Now completely outside Form 1, eliminating the layout crash)
+    with tab_chk:
+        with st.form("verify_status_form"):
+            chk_phone = st.text_input("Enter your registered phone number:")
+            verify_btn = st.form_submit_button("Verify & Unlock Terminal")
+
+            if verify_btn:
+                stat = check_user_status(chk_phone)
+                if stat and stat[0] == "APPROVED":
+                    st.session_state.authenticated_user = stat[1]
+                    st.success("Access Verified! Launching Terminal...")
+                    st.rerun()
+                elif stat and stat[0] == "PENDING":
+                    st.warning("Access Pending. Administrator has not approved yet. Please wait.")
+                else:
+                    st.error("No registered request found for this phone number.")
 
     st.markdown("</div>", unsafe_allow_html=True)
-    st.stop()  # STOPS EXECUTION - Visitor CANNOT see anything below this line!
+    st.stop()  # Terminal remains locked until approved!
 
 # ================= 5. LIVE MARKET DATA (INDICES + SENSEX) =================
 @st.cache_data(ttl=15)
@@ -276,18 +282,12 @@ market = get_live_market_data()
 
 # ================= 6. OPTION CHAIN BUILDER (NIFTY & SENSEX) =================
 def generate_option_chain(underlying_name: str, spot: float, step: int):
-    """Generates an accurate Option Chain matrix centered around ATM."""
     atm = int(round(spot / step) * step)
     chain = []
-    # 5 strikes below ATM, ATM, and 5 strikes above ATM
     for i in range(-4, 5):
         strike = atm + (i * step)
-        
-        # CE pricing: In-the-money intrinsic + time value
         ce_intrinsic = max(0.0, spot - strike)
         ce_ltp = round(ce_intrinsic + 75.0 + abs(i)*4.5, 1)
-        
-        # PE pricing: In-the-money intrinsic + time value
         pe_intrinsic = max(0.0, strike - spot)
         pe_ltp = round(pe_intrinsic + 70.0 + abs(i)*4.5, 1)
 
@@ -301,14 +301,13 @@ def generate_option_chain(underlying_name: str, spot: float, step: int):
     return pd.DataFrame(chain)
 
 # ================= 7. MAIN LOGGED-IN TERMINAL UI =================
-# Clean Header with ZERO private credentials shown
 st.markdown(f"""
 <div class="header-box">
     <div style="display:flex; justify-content:space-between; align-items:center;">
         <div>
             <span style="font-size:1.4rem; font-weight:800; color:#38bdf8;">⚡ KNOWLEDGE HUB — QUANT TERMINAL</span>
             <div style="font-size:0.85rem; color:#94a3b8; margin-top:4px;">
-                Verified Trader: <b style="color:#10b981;">{st.session_state.authenticated_user}</b> | Direct Market Feeds Active
+                Verified Member: <b style="color:#10b981;">{st.session_state.authenticated_user}</b> | Direct Feed Stream
             </div>
         </div>
         <div style="text-align:right;">
@@ -326,7 +325,7 @@ c2.metric("BANK NIFTY", f"₹{market['BANK NIFTY']['val']}", market['BANK NIFTY'
 c3.metric("SENSEX", f"₹{market['SENSEX']['val']}", market['SENSEX']['chg'])
 c4.metric("INDIA VIX", f"{market['INDIA VIX']['val']}", market['INDIA VIX']['chg'], delta_color="inverse")
 
-# Clean Sidebar - All private balances and bot tokens completely HIDDEN
+# Clean Sidebar - All private details hidden
 with st.sidebar:
     st.markdown("### 🟢 Terminal Engine")
     st.success("Exchange Data Feed: Online")
@@ -383,7 +382,7 @@ with t_signals:
     </div>
     """, unsafe_allow_html=True)
 
-    # SENSEX Card (100-point strikes as requested)
+    # SENSEX Card
     s_spot = market["SENSEX"]["spot"]
     s_atm = int(round(s_spot / 100.0) * 100)
     s_strike = s_atm - 100 # 1 Strike ITM for SENSEX
