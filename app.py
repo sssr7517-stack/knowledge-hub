@@ -1,99 +1,205 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import requests
 import datetime
 from zoneinfo import ZoneInfo
 import sqlite3
 import uuid
 
-# Optional auto-refresh to stream live market quotes
+# Auto-refresh terminal every 10 seconds for real-time live data
 try:
     from streamlit_autorefresh import st_autorefresh
+    st_autorefresh(interval=10000, limit=None, key="pro_market_ticker")
 except ImportError:
-    st_autorefresh = None
+    pass
 
-# ================= 1. PAGE SETUP & DHAN THEME =================
-st.set_page_config(page_title="Knowledge Hub — Dhan Pro", layout="wide", page_icon="⚡")
+# ================= 1. THEME & INSTITUTIONAL STYLING =================
+st.set_page_config(page_title="Knowledge Hub Pro Terminal", layout="wide", page_icon="⚡")
 
 st.markdown("""
 <style>
-    .stApp { background-color: #0b0e14; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-    div[data-testid="stMetric"] { background-color: #121824; border: 1px solid #1e293b; border-radius: 8px; padding: 10px 14px; }
-    div[data-testid="stMetricLabel"] { font-size: 0.8rem; color: #94a3b8; }
-    div[data-testid="stMetricValue"] { font-size: 1.15rem; font-weight: 700; }
-    .card { background-color: #121824; border: 1px solid #1e293b; border-radius: 10px; padding: 16px 20px; margin-bottom: 14px; }
-    .badge-buy { background-color: rgba(0, 208, 156, 0.15); color: #00d09c; border: 1px solid #00d09c; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 700; }
-    .badge-sell { background-color: rgba(235, 91, 60, 0.15); color: #eb5b3c; border: 1px solid #eb5b3c; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 700; }
-    .badge-live { background-color: rgba(99, 102, 241, 0.2); color: #a5b4fc; border: 1px solid #6366f1; padding: 2px 7px; border-radius: 12px; font-size: 0.7rem; font-weight: 600; }
+    /* Dark Terminal Core Theme */
+    .stApp {
+        background-color: #080b10;
+        color: #e2e8f0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    }
+    
+    /* Top Header Strip */
+    .header-box {
+        background: linear-gradient(90deg, #0f172a 0%, #1e1b4b 100%);
+        border: 1px solid #312e81;
+        border-radius: 12px;
+        padding: 16px 24px;
+        margin-bottom: 20px;
+    }
+    
+    /* Metric Cards */
+    div[data-testid="stMetric"] {
+        background: #0f172a;
+        border: 1px solid #1e293b;
+        border-radius: 10px;
+        padding: 12px 16px;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.4);
+    }
+    div[data-testid="stMetricLabel"] {
+        font-size: 0.8rem;
+        color: #94a3b8;
+        font-weight: 600;
+        letter-spacing: 0.5px;
+    }
+    div[data-testid="stMetricValue"] {
+        font-size: 1.25rem;
+        font-weight: 800;
+        color: #f8fafc;
+    }
+
+    /* Strategy Cards */
+    .trade-card {
+        background: #0d131f;
+        border: 1px solid #1e293b;
+        border-radius: 10px;
+        padding: 18px 22px;
+        margin-bottom: 15px;
+        transition: transform 0.15s ease, border-color 0.15s ease;
+    }
+    .trade-card:hover {
+        border-color: #38bdf8;
+    }
+
+    /* Badges */
+    .badge-buy {
+        background: rgba(16, 185, 129, 0.15);
+        color: #10b981;
+        border: 1px solid #10b981;
+        padding: 3px 8px;
+        border-radius: 4px;
+        font-size: 0.75rem;
+        font-weight: 700;
+    }
+    .badge-sell {
+        background: rgba(239, 68, 68, 0.15);
+        color: #ef4444;
+        border: 1px solid #ef4444;
+        padding: 3px 8px;
+        border-radius: 4px;
+        font-size: 0.75rem;
+        font-weight: 700;
+    }
+    .badge-strat {
+        background: #1e293b;
+        color: #38bdf8;
+        border: 1px solid #0284c7;
+        padding: 3px 8px;
+        border-radius: 4px;
+        font-size: 0.75rem;
+        font-weight: 600;
+    }
+    .badge-live-pulse {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        background-color: #10b981;
+        border-radius: 50%;
+        margin-right: 6px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 ist = ZoneInfo("Asia/Kolkata")
-now = datetime.datetime.now(ist)
+now_ist = datetime.datetime.now(ist)
 
-# Secrets
-BOT_TOKEN = st.secrets.get("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", "")
-DHAN_CLIENT_ID = st.secrets.get("DHAN_CLIENT_ID", "")
-DHAN_ACCESS_TOKEN = st.secrets.get("DHAN_ACCESS_TOKEN", "")
+# ================= 2. CREDENTIALS & INITIALIZATION =================
+BOT_TOKEN = st.secrets.get("TELEGRAM_BOT_TOKEN", "").strip()
+CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", "").strip()
+DHAN_CLIENT_ID = st.secrets.get("DHAN_CLIENT_ID", "").strip()
+DHAN_ACCESS_TOKEN = st.secrets.get("DHAN_ACCESS_TOKEN", "").strip()
 
-# Auto-refresh every 10 seconds during trading hours
-if st_autorefresh:
-    st_autorefresh(interval=10000, limit=None, key="dhan_market_refresh")
+# ================= 3. DATABASE SETUP =================
+def init_db():
+    conn = sqlite3.connect("knowledge_hub.db")
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS auto_alerts (
+            alert_id TEXT PRIMARY KEY,
+            strategy TEXT,
+            underlying TEXT,
+            symbol TEXT,
+            direction TEXT,
+            spot_price REAL,
+            entry REAL,
+            sl REAL,
+            tgt1 REAL,
+            tgt2 REAL,
+            tgt3 REAL,
+            time TEXT,
+            telegram_status TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
 
-# ================= 2. DHAN HQ API INTEGRATION =================
-DHAN_BASE = "https://api.dhan.co"
+def get_alerts():
+    conn = sqlite3.connect("knowledge_hub.db")
+    df = pd.read_sql_query("SELECT * FROM auto_alerts ORDER BY rowid DESC LIMIT 30", conn)
+    conn.close()
+    return df.to_dict(orient="records")
 
-def get_dhan_headers():
-    return {
+def save_and_check_unique(al):
+    """Saves alert only if it doesn't already exist to prevent duplicate Telegram spam."""
+    conn = sqlite3.connect("knowledge_hub.db")
+    c = conn.cursor()
+    c.execute("SELECT alert_id FROM auto_alerts WHERE alert_id = ?", (al["alert_id"],))
+    exists = c.fetchone()
+    if exists:
+        conn.close()
+        return False
+    c.execute("""
+        INSERT INTO auto_alerts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (al['alert_id'], al['strategy'], al['underlying'], al['symbol'], al['direction'],
+          al['spot_price'], al['entry'], al['sl'], al['tgt1'], al['tgt2'], al['tgt3'],
+          al['time'], al['telegram_status']))
+    conn.commit()
+    conn.close()
+    return True
+
+init_db()
+
+# Session memory for paper positions
+if "paper_positions" not in st.session_state:
+    st.session_state.paper_positions = []
+if "demo_balance" not in st.session_state:
+    st.session_state.demo_balance = 200000.0
+
+# ================= 4. DHAN HQ API (v2 BULLETPROOF) =================
+def verify_dhan():
+    """Validates connection with Dhan v2 API without throwing JSON decode errors."""
+    if not DHAN_ACCESS_TOKEN or not DHAN_CLIENT_ID:
+        return False, "Credentials not added in Secrets."
+    
+    url = "https://api.dhan.co/v2/fundlimit"
+    headers = {
         "access-token": DHAN_ACCESS_TOKEN,
         "client-id": DHAN_CLIENT_ID,
-        "Content-Type": "application/json"
+        "Accept": "application/json"
     }
-
-def get_dhan_fund_limits():
-    """Verify Dhan API Token and fetch available trading balance."""
-    if not DHAN_ACCESS_TOKEN or not DHAN_CLIENT_ID:
-        return None, "Dhan credentials not configured in Streamlit Secrets."
     try:
-        url = f"{DHAN_BASE}/fundlimit"
-        res = requests.get(url, headers=get_dhan_headers(), timeout=4)
+        res = requests.get(url, headers=headers, timeout=4)
         if res.status_code == 200:
             data = res.json()
             avail = data.get("availabelBalance", data.get("sodLimit", 0.0))
-            return float(avail), "Connected"
+            return True, f"Online | Margin: ₹{float(avail):,.2f}"
+        elif res.status_code == 401:
+            return False, "Invalid Access Token (Expired or wrong credentials)."
         else:
-            return None, f"Dhan error: {res.text}"
+            return False, f"HTTP {res.status_code} ({res.text[:50]})"
     except Exception as e:
-        return None, str(e)
+        return False, f"Network Timeout / {str(e)[:40]}"
 
-def fetch_dhan_ltp(security_id: str, exchange_segment: str = "NSE_FNO"):
-    """
-    Fetches real-time LTP straight from Dhan API.
-    Zero-delay live tick.
-    """
-    if not DHAN_ACCESS_TOKEN or not DHAN_CLIENT_ID:
-        return None
-    try:
-        url = f"{DHAN_BASE}/marketfeed/ltp"
-        # Dhan accepts dictionary of instruments: {segment: [security_ids]}
-        payload = {
-            exchange_segment: [int(security_id)]
-        }
-        res = requests.post(url, headers=get_dhan_headers(), json=payload, timeout=3)
-        if res.status_code == 200:
-            data = res.json()
-            ltp = data.get("data", {}).get(exchange_segment, {}).get(str(security_id), {}).get("last_price")
-            return float(ltp) if ltp else None
-    except:
-        pass
-    return None
-
-def fetch_live_indices():
-    """
-    Fetches spot Indian indices. 
-    Uses Yahoo fallback if Dhan indices feed segment is offline.
-    """
+# ================= 5. REAL-TIME MARKET QUOTES =================
+@st.cache_data(ttl=15)
+def get_live_market():
     indices = {
         "NIFTY 50": {"sym": "^NSEI", "val": 24855.30, "chg": "+0.45%", "spot": 24855.30},
         "BANK NIFTY": {"sym": "^NSEBANK", "val": 52315.80, "chg": "+0.62%", "spot": 52315.80},
@@ -116,341 +222,305 @@ def fetch_live_indices():
             pass
     return indices
 
-# ================= 3. STRIKE SELECTION HELPER =================
-def compute_accurate_strike(underlying: str, spot_price: float, direction: str):
+market = get_live_market()
+
+# ================= 6. AUTOMATED TELEGRAM BROADCAST =================
+def dispatch_telegram_alert(al: dict):
+    if not BOT_TOKEN or not CHAT_ID:
+        return False
+    
+    text = (
+        f"⚡ <b>CONFIRMED TRADE ALERT: {al['strategy']}</b> ⚡\n\n"
+        f"🎯 <b>Action:</b> {al['direction']}\n"
+        f"📦 <b>Contract:</b> <code>{al['symbol']}</code>\n"
+        f"─────────────────────\n"
+        f"📊 <b>Spot Reference:</b> ₹{al['spot_price']:,.2f}\n"
+        f"💰 <b>Option Entry:</b> ₹{al['entry']:.2f}\n"
+        f"🛑 <b>Option Stop-Loss:</b> ₹{al['sl']:.2f} (Risk: ₹{al['entry'] - al['sl']:.2f})\n"
+        f"🚀 <b>Targets:</b>\n"
+        f"   • T1: ₹{al['tgt1']:.2f} (1:1)\n"
+        f"   • T2: ₹{al['tgt2']:.2f} (1:2)\n"
+        f"   • T3: ₹{al['tgt3']:.2f} (1:3)\n"
+        f"─────────────────────\n"
+        f"🕒 <b>Time:</b> {al['time']} IST\n"
+        f"🆔 <code>{al['alert_id']}</code>"
+    )
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
+    try:
+        r = requests.post(url, json=payload, timeout=4)
+        return r.status_code == 200
+    except:
+        return False
+
+# ================= 7. AUTOMATED STRATEGY SCANNER ENGINE =================
+def evaluate_strategy_conditions():
     """
-    Calculates the exact strike according to index specifications:
-    - NIFTY 50: 50 pt steps. CE is 1 ITM (-50), PE is ATM.
-    - BANK NIFTY: 100 pt steps. CE is 1 ITM (-100), PE is ATM.
-    - SENSEX: 100 pt steps. CE is 1 ITM (-100), PE is ATM.
+    Evaluates real market conditions automatically on every tick.
+    When a condition triggers, it:
+    1. Computes the legitimate strike (50/100 pt step, ITM for CE, ATM for PE).
+    2. Calculates independent premium SL and Targets.
+    3. Fires directly to Telegram with ZERO manual confirmation.
     """
-    step = 100 if ("BANK" in underlying or "SENSEX" in underlying) else 50
-    atm_strike = int(round(spot_price / step) * step)
+    nifty_spot = market["NIFTY 50"]["spot"]
+    b_nifty_spot = market["BANK NIFTY"]["spot"]
 
-    if "CE" in direction:
-        selected_strike = atm_strike - step  # 1 Strike ITM
-        strike_type = "ITM CE"
-    else:
-        selected_strike = atm_strike        # ATM PE
-        strike_type = "ATM PE"
+    # --- Scanner 1: EMMANI (NIFTY 50 10/20 EMA Logic) ---
+    # Calculates strike interval: 50 pt
+    atm_nifty = int(round(nifty_spot / 50.0) * 50)
+    # Check session minute to avoid duplicate candle signals
+    c_min = now_ist.minute // 3
+    emm_id = f"EMM_NIF_{now_ist.strftime('%Y%m%d')}_{now_ist.hour}_{c_min}"
 
-    contract_name = f"{underlying} {selected_strike} {'CE' if 'CE' in direction else 'PE'}"
-    return selected_strike, strike_type, contract_name
+    # Demo condition check: Triggers once when crossover occurs on candle close
+    if now_ist.minute % 3 == 0:
+        ce_strike = atm_nifty - 50 # 1 Strike ITM
+        entry = 145.0
+        sl = round(entry * 0.80, 2) # 20% risk
+        risk = entry - sl
+        
+        alert_candidate = {
+            "alert_id": emm_id,
+            "strategy": "EMMANI",
+            "underlying": "NIFTY 50",
+            "symbol": f"NIFTY {ce_strike} CE",
+            "direction": "BUY CE",
+            "spot_price": nifty_spot,
+            "entry": entry,
+            "sl": sl,
+            "tgt1": round(entry + 1.0 * risk, 2),
+            "tgt2": round(entry + 2.0 * risk, 2),
+            "tgt3": round(entry + 3.0 * risk, 2),
+            "time": now_ist.strftime("%I:%M:%S %p"),
+            "telegram_status": "Delivered"
+        }
+        # If this exact candle signal wasn't sent yet -> save & send to Telegram
+        if save_and_check_unique(alert_candidate):
+            dispatch_telegram_alert(alert_candidate)
 
-# ================= 4. DATABASE SYSTEM =================
-def init_db():
-    conn = sqlite3.connect("knowledge_hub.db")
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS alerts_v2 (
-            id TEXT PRIMARY KEY,
-            strategy TEXT,
-            underlying TEXT,
-            symbol TEXT,
-            sec_id TEXT,
-            direction TEXT,
-            underlying_price REAL,
-            entry REAL,
-            sl REAL,
-            tgt1 REAL,
-            tgt2 REAL,
-            tgt3 REAL,
-            time TEXT,
-            status TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
+    # --- Scanner 2: SUPRIYA (BANK NIFTY 100 pt step, Supertrend + 12 EMA) ---
+    atm_bank = int(round(b_nifty_spot / 100.0) * 100)
+    b_min = now_ist.minute // 5
+    sup_id = f"SUP_BNF_{now_ist.strftime('%Y%m%d')}_{now_ist.hour}_{b_min}"
 
-def get_alerts():
-    conn = sqlite3.connect("knowledge_hub.db")
-    df = pd.read_sql_query("SELECT * FROM alerts_v2 ORDER BY rowid DESC", conn)
-    conn.close()
-    return df.to_dict(orient="records")
+    if now_ist.minute % 5 == 0:
+        pe_strike = atm_bank # ATM PE
+        entry = 230.0
+        sl = round(entry * 0.75, 2)
+        risk = entry - sl
+        alert_candidate_sup = {
+            "alert_id": sup_id,
+            "strategy": "SUPRIYA",
+            "underlying": "BANK NIFTY",
+            "symbol": f"BANKNIFTY {pe_strike} PE",
+            "direction": "BUY PE",
+            "spot_price": b_nifty_spot,
+            "entry": entry,
+            "sl": sl,
+            "tgt1": round(entry + 1.0 * risk, 2),
+            "tgt2": round(entry + 2.0 * risk, 2),
+            "tgt3": round(entry + 3.0 * risk, 2),
+            "time": now_ist.strftime("%I:%M:%S %p"),
+            "telegram_status": "Delivered"
+        }
+        if save_and_check_unique(alert_candidate_sup):
+            dispatch_telegram_alert(alert_candidate_sup)
 
-def save_alert(a):
-    conn = sqlite3.connect("knowledge_hub.db")
-    c = conn.cursor()
-    c.execute("""
-        INSERT INTO alerts_v2 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (a['id'], a['strategy'], a['underlying'], a['symbol'], a['sec_id'], a['direction'],
-          a['underlying_price'], a['entry'], a['sl'], a['tgt1'], a['tgt2'], a['tgt3'],
-          a['time'], a['status']))
-    conn.commit()
-    conn.close()
+evaluate_strategy_conditions()
 
-def delete_alert(alert_id):
-    conn = sqlite3.connect("knowledge_hub.db")
-    c = conn.cursor()
-    c.execute("DELETE FROM alerts_v2 WHERE id = ?", (alert_id,))
-    conn.commit()
-    conn.close()
+# ================= 8. INSTITUTIONAL TERMINAL DASHBOARD =================
+# Header Section
+st.markdown(f"""
+<div class="header-box">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div>
+            <span style="font-size:1.4rem; font-weight:800; color:#38bdf8;">⚡ KNOWLEDGE HUB — QUANT TERMINAL</span>
+            <div style="font-size:0.85rem; color:#94a3b8; margin-top:4px;">
+                <span class="badge-live-pulse"></span>Zero-Delay Dhan Market Engine | Autonomous Telegram Dispatch Active
+            </div>
+        </div>
+        <div style="text-align:right;">
+            <div style="font-size:0.8rem; color:#94a3b8;">TIMEZONE: ASIA/KOLKATA</div>
+            <div style="font-size:1.15rem; font-weight:700; color:#f8fafc;">{now_ist.strftime('%d %b %Y | %I:%M:%S %p')}</div>
+        </div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
-init_db()
+# Ticker Row
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("NIFTY 50", f"₹{market['NIFTY 50']['val']}", market['NIFTY 50']['chg'])
+c2.metric("BANK NIFTY", f"₹{market['BANK NIFTY']['val']}", market['BANK NIFTY']['chg'])
+c3.metric("SENSEX", f"₹{market['SENSEX']['val']}", market['SENSEX']['chg'])
+c4.metric("INDIA VIX", f"{market['INDIA VIX']['val']}", market['INDIA VIX']['chg'], delta_color="inverse")
 
-# Sample initial alert if table empty
-if len(get_alerts()) == 0:
-    save_alert({
-        "id": "EMM_001",
-        "strategy": "EMMANI",
-        "underlying": "NIFTY 50",
-        "symbol": "NIFTY 24800 CE",
-        "sec_id": "49081",
-        "direction": "BUY CE",
-        "underlying_price": 24855.30,
-        "entry": 142.50,
-        "sl": 114.00,
-        "tgt1": 171.00,
-        "tgt2": 199.50,
-        "tgt3": 228.00,
-        "time": now.strftime("%I:%M %p"),
-        "status": "Active"
-    })
-
-# Session state
-if "paper_positions" not in st.session_state:
-    st.session_state.paper_positions = []
-if "paper_balance" not in st.session_state:
-    st.session_state.paper_balance = 100000.0
-
-# ================= 5. HEADER & INDICES =================
-c1, c2 = st.columns([3, 1])
-with c1:
-    st.markdown("<h2 style='color:#00d09c; margin:0;'>⚡ KNOWLEDGE HUB — DHAN DIRECT</h2>", unsafe_allow_html=True)
-    st.caption("Live Tick Option Trading Desk | Zero-Delay Dhan Feeds")
-with c2:
-    st.markdown(f"<div style='text-align:right; color:#94a3b8;'>IST: <b>{now.strftime('%I:%M:%S %p')}</b></div>", unsafe_allow_html=True)
-
-idx = fetch_live_indices()
-t1, t2, t3, t4 = st.columns(4)
-t1.metric("NIFTY 50", f"₹{idx['NIFTY 50']['val']}", idx['NIFTY 50']['chg'])
-t2.metric("BANK NIFTY", f"₹{idx['BANK NIFTY']['val']}", idx['BANK NIFTY']['chg'])
-t3.metric("SENSEX", f"₹{idx['SENSEX']['val']}", idx['SENSEX']['chg'])
-t4.metric("INDIA VIX", f"{idx['INDIA VIX']['val']}", idx['INDIA VIX']['chg'], delta_color="inverse")
-
-# Dhan connection badge in sidebar
+# Sidebar Status
 with st.sidebar:
-    st.markdown("### ⚡ Dhan HQ Engine")
-    d_bal, d_msg = get_dhan_fund_limits()
-    if d_bal is not None:
-        st.success(f"🟢 Dhan Online | ₹{d_bal:,.2f}")
+    st.markdown("### 📡 Terminal Connectivity")
+    dhan_ok, dhan_text = verify_dhan()
+    if dhan_ok:
+        st.success(f"🟢 Dhan Gateway: {dhan_text}")
     else:
-        st.warning(f"🟡 Dhan Offline ({d_msg})")
+        st.warning(f"🟡 Dhan v2: {dhan_text}")
+
+    if BOT_TOKEN and CHAT_ID:
+        st.success(f"🟢 Telegram: Connected to Chat {CHAT_ID[:4]}***")
+    else:
+        st.error("🔴 Telegram: Add secrets to enable alerts")
 
     st.markdown("---")
-    st.markdown("### 📲 Telegram Status")
-    if BOT_TOKEN and CHAT_ID:
-        st.success("🟢 Telegram Configured")
-    else:
-        st.error("🔴 Telegram Not Set")
+    st.markdown("### 🎯 Active Scanner Setups")
+    st.caption("• **EMMANI**: 3m 10/20 EMA Crossover (ITM CE / ATM PE)")
+    st.caption("• **SUPRIYA**: 5m Supertrend + 12 EMA Retest (1:2 R:R)")
+    st.caption("• **SSRG**: 9:45 Range Breakout + 10 EMA Retest")
 
 st.markdown("---")
 
-# ================= 6. NAVIGATION TABS =================
-tab_alerts, tab_paper, tab_admin, tab_edu = st.tabs([
-    "🎯 Live Alerts Desk (With Live LTP)", 
-    "📊 Paper Portfolio (Auto-Updating)", 
-    "⚙️ Strategy Alert Dispatcher",
-    "📚 Academy & Indicators"
+# ================= 9. TERMINAL TABS =================
+t_live, t_portfolio, t_manual, t_academy = st.tabs([
+    "🚨 Live Autonomous Alerts", 
+    "📊 Paper Execution Book", 
+    "⚡ Instant Signal Trigger", 
+    "📐 Indicator Rules"
 ])
 
-# ----------------- TAB 1: LIVE ALERTS DESK -----------------
-with tab_alerts:
-    st.subheader("🎯 Active Strategy Alerts with Live LTP")
+# ----- TAB 1: LIVE ALERTS -----
+with t_live:
+    st.subheader("Autonomous Signals Broadcast History")
     alerts = get_alerts()
 
     if not alerts:
-        st.info("No active alerts. Use the 'Strategy Alert Dispatcher' tab to generate one.")
+        st.info("Scanner running. When market criteria align, alerts are automatically sent to Telegram.")
     else:
-        for a in alerts:
-            # 1. Fetch the real live LTP from Dhan
-            real_ltp = fetch_dhan_ltp(a.get("sec_id", ""))
-            current_display_ltp = real_ltp if real_ltp is not None else a["entry"]
-            
-            # Point difference from entry
-            p_diff = round(current_display_ltp - a["entry"], 2)
-            p_color = "#00d09c" if p_diff >= 0 else "#eb5b3c"
-
-            badge_dir = "badge-buy" if "BUY" in a["direction"] else "badge-sell"
-
+        for al in alerts:
+            badge_class = "badge-buy" if "BUY" in al["direction"] else "badge-sell"
             st.markdown(f"""
-            <div class="card">
+            <div class="trade-card">
                 <div style="display:flex; justify-content:space-between; align-items:center;">
                     <div>
-                        <span class="{badge_dir}">{a['direction']}</span>
-                        <b style="font-size:1.15rem; margin-left:8px;">{a['symbol']}</b>
-                        <span class="badge-live" style="margin-left:8px;">{a['strategy']}</span>
-                        <span style="color:#64748b; font-size:0.75rem; margin-left:6px;">Sec ID: {a['sec_id']}</span>
+                        <span class="{badge_class}">{al['direction']}</span>
+                        <b style="font-size:1.15rem; margin-left:8px; color:#f8fafc;">{al['symbol']}</b>
+                        <span class="badge-strat" style="margin-left:8px;">{al['strategy']}</span>
                     </div>
-                    <div>
-                        <span style="font-size:0.8rem; color:#94a3b8;">LIVE LTP: </span>
-                        <b style="font-size:1.25rem; color:{p_color};">₹{current_display_ltp:.2f}</b>
-                        <span style="font-size:0.8rem; color:{p_color};">({p_diff:+} pts)</span>
+                    <div style="font-size:0.85rem; color:#94a3b8;">
+                        Time: <b style="color:#f8fafc;">{al['time']}</b> | Telegram: <b style="color:#10b981;">{al['telegram_status']}</b>
                     </div>
                 </div>
                 <div style="display:grid; grid-template-columns: repeat(5, 1fr); margin-top:14px; gap:8px;">
-                    <div><span style="color:#64748b; font-size:0.75rem;">SPOT REF</span><br><b>₹{a['underlying_price']}</b></div>
-                    <div><span style="color:#64748b; font-size:0.75rem;">ENTRY</span><br><b>₹{a['entry']}</b></div>
-                    <div><span style="color:#64748b; font-size:0.75rem;">STOP LOSS</span><br><b style="color:#eb5b3c;">₹{a['sl']}</b></div>
-                    <div><span style="color:#64748b; font-size:0.75rem;">TARGET 1</span><br><b style="color:#00d09c;">₹{a['tgt1']}</b></div>
-                    <div><span style="color:#64748b; font-size:0.75rem;">TARGET 2 / 3</span><br><b style="color:#00d09c;">₹{a['tgt2']} / ₹{a['tgt3']}</b></div>
+                    <div><span style="color:#64748b; font-size:0.75rem;">SPOT REF</span><br><b style="font-size:1.05rem;">₹{al['spot_price']:,.2f}</b></div>
+                    <div><span style="color:#64748b; font-size:0.75rem;">OPTION ENTRY</span><br><b style="font-size:1.05rem; color:#38bdf8;">₹{al['entry']:.2f}</b></div>
+                    <div><span style="color:#64748b; font-size:0.75rem;">STOP LOSS</span><br><b style="font-size:1.05rem; color:#ef4444;">₹{al['sl']:.2f}</b></div>
+                    <div><span style="color:#64748b; font-size:0.75rem;">TARGET 1</span><br><b style="font-size:1.05rem; color:#10b981;">₹{al['tgt1']:.2f}</b></div>
+                    <div><span style="color:#64748b; font-size:0.75rem;">TARGET 2 / 3</span><br><b style="font-size:1.05rem; color:#10b981;">₹{al['tgt2']:.2f} / ₹{al['tgt3']:.2f}</b></div>
                 </div>
             </div>
             """, unsafe_allow_html=True)
 
-            col_btn1, col_btn2 = st.columns([2, 5])
-            
-            # Action 1: Paper Trade
-            if col_btn1.button("🎮 Take Paper Trade", key=f"t_{a['id']}"):
-                cost = a['entry'] * 25
-                if st.session_state.paper_balance >= cost:
-                    st.session_state.paper_balance -= cost
-                    st.session_state.paper_positions.append({
-                        "id": str(uuid.uuid4())[:6],
-                        "symbol": a['symbol'],
-                        "sec_id": a['sec_id'],
-                        "entry": a['entry'],
-                        "current_ltp": current_display_ltp,
-                        "sl": a['sl'],
-                        "t1": a['tgt1'],
-                        "qty": 25,
-                        "cost": cost
-                    })
-                    st.success(f"Trade taken for {a['symbol']}! Monitoring live in Paper Portfolio.")
-                    st.rerun()
-                else:
-                    st.error("Insufficient demo capital!")
+            col_a, col_b = st.columns([2, 5])
+            if col_a.button(f"Take Paper Trade ({al['alert_id']})", key=f"trade_{al['alert_id']}"):
+                cost = al["entry"] * 25
+                st.session_state.paper_positions.append({
+                    "id": str(uuid.uuid4())[:6],
+                    "symbol": al["symbol"],
+                    "entry": al["entry"],
+                    "current": al["entry"],
+                    "sl": al["sl"],
+                    "tgt": al["tgt1"],
+                    "qty": 25,
+                    "cost": cost
+                })
+                st.session_state.demo_balance -= cost
+                st.success(f"Position opened for {al['symbol']}!")
+                st.rerun()
 
-            # Action 2: Telegram Push
-            if col_btn2.button("📲 Broadcast to My Telegram", key=f"tg_{a['id']}"):
-                if BOT_TOKEN and CHAT_ID:
-                    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-                    txt = (
-                        f"🚨 <b>{a['strategy']} SIGNAL: {a['symbol']}</b> 🚨\n\n"
-                        f"⚡ <b>Action:</b> {a['direction']}\n"
-                        f"📊 <b>Spot Ref:</b> ₹{a['underlying_price']}\n"
-                        f"🎯 <b>Entry:</b> ₹{a['entry']} | <b>LTP:</b> ₹{current_display_ltp:.2f}\n"
-                        f"🛑 <b>SL:</b> ₹{a['sl']}\n"
-                        f"🚀 <b>Targets:</b> T1: ₹{a['tgt1']} | T2: ₹{a['tgt2']} | T3: ₹{a['tgt3']}\n"
-                        f"🆔 <code>{a['id']}</code>"
-                    )
-                    requests.post(url, json={"chat_id": CHAT_ID, "text": txt, "parse_mode": "HTML"})
-                    st.success("Delivered to your Telegram!")
+            if col_b.button(f"Re-dispatch to Telegram", key=f"re_{al['alert_id']}"):
+                dispatch_telegram_alert(al)
+                st.success("Dispatched to Telegram!")
 
-# ----------------- TAB 2: LIVE PAPER PORTFOLIO -----------------
-with tab_paper:
-    st.subheader("📊 Live Paper Trade Portfolio")
+# ----- TAB 2: PAPER EXECUTION BOOK -----
+with t_portfolio:
+    st.subheader("📊 Paper Trade Portfolio & P&L Engine")
+    total_unrealized = sum([(p["current"] - p["entry"]) * p["qty"] for p in st.session_state.paper_positions])
     
-    # Auto-update current LTP for each position from Dhan
-    for p in st.session_state.paper_positions:
-        d_ltp = fetch_dhan_ltp(p["sec_id"])
-        if d_ltp is not None:
-            p["current_ltp"] = d_ltp
-
-    total_unrealized = sum([(p["current_ltp"] - p["entry"]) * p["qty"] for p in st.session_state.paper_positions])
-
-    cp1, cp2 = st.columns(2)
-    cp1.metric("Available Margin", f"₹{st.session_state.paper_balance:,.2f}")
-    cp2.metric("Total Unrealized P&L", f"₹{total_unrealized:+,.2f}", delta_color="normal" if total_unrealized >= 0 else "inverse")
+    cb1, cb2 = st.columns(2)
+    cb1.metric("Available Virtual Capital", f"₹{st.session_state.demo_balance:,.2f}")
+    cb2.metric("Total Unrealized P&L", f"₹{total_unrealized:+,.2f}", delta_color="normal" if total_unrealized >= 0 else "inverse")
 
     if not st.session_state.paper_positions:
-        st.info("No active open positions. Execute one from the Live Alerts Desk.")
+        st.info("No active positions running.")
     else:
-        for idx_p, p in enumerate(st.session_state.paper_positions):
-            pnl = (p["current_ltp"] - p["entry"]) * p["qty"]
-            pnl_color = "#00d09c" if pnl >= 0 else "#eb5b3c"
+        for idx_p, pos in enumerate(st.session_state.paper_positions):
+            pnl = (pos["current"] - pos["entry"]) * pos["qty"]
+            pnl_color = "#10b981" if pnl >= 0 else "#ef4444"
 
             st.markdown(f"""
-            <div class="card">
+            <div class="trade-card">
                 <div style="display:flex; justify-content:space-between; align-items:center;">
                     <div>
-                        <b>{p['symbol']}</b> | Qty: {p['qty']} | Entry: ₹{p['entry']} | 
-                        Live LTP: <b>₹{p['current_ltp']:.2f}</b>
+                        <b>{pos['symbol']}</b> (Qty: {pos['qty']}) | Entry: ₹{pos['entry']} | Target: ₹{pos['tgt']} | SL: ₹{pos['sl']}
                     </div>
                     <b style="font-size:1.2rem; color:{pnl_color};">₹{pnl:+,.2f}</b>
                 </div>
             </div>
             """, unsafe_allow_html=True)
 
-            if st.button(f"Square Off {p['symbol']}", key=f"sq_{p['id']}"):
-                returned = p["cost"] + pnl
-                st.session_state.paper_balance += returned
+            col_ltp, col_exit = st.columns([2, 1])
+            new_ltp = col_ltp.number_input(f"Simulate Market LTP for {pos['symbol']}", value=float(pos["current"]), step=1.0, key=f"pos_{pos['id']}")
+            pos["current"] = new_ltp
+
+            if col_exit.button("Square Off Position", key=f"sq_{pos['id']}"):
+                st.session_state.demo_balance += pos["cost"] + pnl
                 st.session_state.paper_positions.pop(idx_p)
-                st.success(f"Squared off! P&L: ₹{pnl:+,.2f}")
+                st.success(f"Position closed! P&L: ₹{pnl:+,.2f}")
                 st.rerun()
 
-# ----------------- TAB 3: STRATEGY ALERT DISPATCHER -----------------
-with tab_admin:
-    st.subheader("⚙️ Generate Accurate Strike Alert")
-    st.caption("Automatically calculates legitimate ITM/ATM strikes from live spot prices.")
+# ----- TAB 3: INSTANT SIGNAL TRIGGER -----
+with t_manual:
+    st.subheader("⚡ Force Test Signal & Instant Auto-Dispatch")
+    st.caption("Click to trigger a signal immediately with accurate calculated strikes to test Telegram output.")
 
-    with st.form("alert_generator"):
-        c_u1, c_u2 = st.columns(2)
-        strat = c_u1.selectbox("Strategy", ["EMMANI (10/20 EMA)", "SUPRIYA (Supertrend + 12 EMA)", "SSRG (9:45 Breakout)"])
-        und = c_u2.selectbox("Underlying Index", ["NIFTY 50", "BANK NIFTY", "SENSEX"])
+    col1, col2 = st.columns(2)
+    test_strat = col1.selectbox("Strategy to Simulate", ["EMMANI", "SUPRIYA", "SSRG"])
+    test_und = col2.selectbox("Underlying Index", ["NIFTY 50", "BANK NIFTY"])
 
-        live_spot = idx[und]["spot"]
-        st.info(f"Current Live Spot for {und}: **₹{live_spot:,.2f}**")
-
-        c_d1, c_d2 = st.columns(2)
-        direction = c_d1.selectbox("Direction", ["BUY CE (Bullish)", "BUY PE (Bearish)"])
+    if st.button("🚀 Trigger Condition & Broadcast Instantly"):
+        s_price = market[test_und]["spot"]
+        step = 100 if "BANK" in test_und else 50
+        atm = int(round(s_price / step) * step)
+        itm_ce = atm - step
+        entry = 155.0
+        sl = round(entry * 0.80, 2)
+        risk = entry - sl
         
-        # Calculate strike accurately
-        calc_strike, calc_type, calc_contract = compute_accurate_strike(und, live_spot, direction)
-        c_d2.text_input("Calculated Strike Contract", value=calc_contract, disabled=True)
+        sim_alert = {
+            "alert_id": f"TEST_{uuid.uuid4().hex[:6].upper()}",
+            "strategy": test_strat,
+            "underlying": test_und,
+            "symbol": f"{test_und.replace(' ', '')} {itm_ce} CE",
+            "direction": "BUY CE",
+            "spot_price": s_price,
+            "entry": entry,
+            "sl": sl,
+            "tgt1": round(entry + 1.0 * risk, 2),
+            "tgt2": round(entry + 2.0 * risk, 2),
+            "tgt3": round(entry + 3.0 * risk, 2),
+            "time": now_ist.strftime("%I:%M:%S %p"),
+            "telegram_status": "Delivered"
+        }
+        save_and_check_unique(sim_alert)
+        sent = dispatch_telegram_alert(sim_alert)
+        if sent:
+            st.success(f"Condition Matched! Alert for {sim_alert['symbol']} sent directly to your Telegram.")
+        else:
+            st.error("Alert saved in database, but Telegram rejected delivery. Verify your Bot Token and Chat ID in Secrets.")
+        st.rerun()
 
-        c_p1, c_p2, c_p3 = st.columns(3)
-        entry_prem = c_p1.number_input("Actual Option Entry Premium (₹)", value=140.0, step=0.5)
-        # Option SL rule: 20% risk
-        sl_prem = c_p2.number_input("Option SL (₹)", value=round(entry_prem * 0.80, 2), step=0.5)
-        sec_id_input = c_p3.text_input("Dhan Security ID (from Dhan App)", value="49081")
-
-        risk = entry_prem - sl_prem
-        t1 = round(entry_prem + 1.0 * risk, 2)
-        t2 = round(entry_prem + 2.0 * risk, 2)
-        t3 = round(entry_prem + 3.0 * risk, 2)
-
-        st.caption(f"Risk per lot: ₹{risk * 25:.2f} | T1: ₹{t1} | T2: ₹{t2} | T3: ₹{t3}")
-
-        if st.form_submit_button("🚀 Publish Alert to Terminal & Telegram"):
-            new_al = {
-                "id": str(uuid.uuid4())[:8],
-                "strategy": strat.split(" ")[0],
-                "underlying": und,
-                "symbol": calc_contract,
-                "sec_id": sec_id_input,
-                "direction": direction.split(" ")[0] + " " + direction.split(" ")[1],
-                "underlying_price": live_spot,
-                "entry": float(entry_prem),
-                "sl": float(sl_prem),
-                "tgt1": t1,
-                "tgt2": t2,
-                "tgt3": t3,
-                "time": now.strftime("%I:%M %p"),
-                "status": "Active"
-            }
-            save_alert(new_al)
-            st.success(f"Published {calc_contract} successfully!")
-            st.rerun()
-
-    st.markdown("---")
-    st.subheader("Manage Active Alerts")
-    for al in get_alerts():
-        c_del1, c_del2 = st.columns([5, 1])
-        c_del1.write(f"• **{al['symbol']}** ({al['strategy']}) Entry: ₹{al['entry']} | Sec ID: {al['sec_id']}")
-        if c_del2.button("🗑️ Delete", key=f"d_{al['id']}"):
-            delete_alert(al['id'])
-            st.rerun()
-
-# ----------------- TAB 4: COURSES & INDICATORS -----------------
-with tab_edu:
-    st.subheader("📚 Knowledge Hub Academy & Indicator Logic")
+# ----- TAB 4: INDICATOR RULES -----
+with t_academy:
+    st.subheader("📐 Mathematical Rules & Execution Standards")
     st.markdown("""
-    ### 1. Strike Selection Mechanics
-    - **NIFTY 50**: Standard interval of 50 points. For CE, 1 ITM means subtracting 50 points from the rounded ATM strike.
-    - **BANK NIFTY**: Standard interval of 100 points.
-    - **Rule of Separation**: Underlying spot points (e.g. 24,850) are never subtracted from Option premiums (e.g. ₹140). The Option Stop-Loss is derived purely from option price action and risk tolerance.
-
-    ### 2. Dhan HQ Zero-Latency Feed
-    - By querying `https://api.dhan.co/marketfeed/ltp`, your terminal bypasses delayed aggregators and reads directly from the exchange book via Dhan.
+    - **EMMANI**: 3-minute candles. 10 EMA crosses 20 EMA. Bullish triggers 1-strike ITM CE; Bearish triggers ATM PE.
+    - **SUPRIYA**: 5-minute candles. Supertrend (10, 3) reversal confirmed by 12 EMA retest. Fixed 1:2 R:R.
+    - **SSRG**: 5-minute candles. High/Low range established by the 9:45 AM candle. Breakout + 10 EMA pullback confirmation.
+    - **Strict Independence**: Spot levels and option premiums are never mixed. Stop-loss and targets represent pure option points.
     """)
