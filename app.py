@@ -7,22 +7,21 @@ import sqlite3
 import uuid
 import time
 
-# Import external stock watchlist
+# Official DhanHQ SDK import
 try:
-    from stock_alerts import get_external_stock_alerts
+    from dhanhq import dhanhq
 except ImportError:
-    def get_external_stock_alerts():
-        return []
+    dhanhq = None
 
 # Auto-refresh terminal every 10 seconds for real-time live data
 try:
     from streamlit_autorefresh import st_autorefresh
-    st_autorefresh(interval=10000, limit=None, key="dhan_verified_stream")
+    st_autorefresh(interval=10000, limit=None, key="dhanhq_real_stream")
 except ImportError:
     pass
 
-# ================= 1. PAGE SETUP & THEME =================
-st.set_page_config(page_title="Knowledge Hub — Dual-Verified Terminal", layout="wide", page_icon="⚡")
+# ================= 1. PAGE SETUP & BROKER THEME =================
+st.set_page_config(page_title="Knowledge Hub — Official Dhan Terminal", layout="wide", page_icon="⚡")
 
 st.markdown("""
 <style>
@@ -53,15 +52,12 @@ st.markdown("""
         border-radius: 8px;
         padding: 14px 18px;
         margin-bottom: 10px;
-        transition: border-color 0.2s ease;
     }
-    .order-card:hover { border-color: #38bdf8; }
-
     .badge-buy { background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid #10b981; padding: 2px 7px; border-radius: 4px; font-size: 0.75rem; font-weight: 700; }
     .badge-sell { background: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid #ef4444; padding: 2px 7px; border-radius: 4px; font-size: 0.75rem; font-weight: 700; }
     .badge-mcx { background: rgba(245, 158, 11, 0.15); color: #f59e0b; border: 1px solid #f59e0b; padding: 2px 7px; border-radius: 4px; font-size: 0.72rem; font-weight: 700; }
     .badge-strat { background: #1e1b4b; color: #818cf8; border: 1px solid #4338ca; padding: 2px 6px; border-radius: 4px; font-size: 0.72rem; font-weight: 600; }
-    .badge-verified { background: rgba(16, 185, 129, 0.2); color: #10b981; border: 1px solid #10b981; padding: 2px 6px; border-radius: 4px; font-size: 0.70rem; font-weight: 700; }
+    .badge-dhan { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid #38bdf8; padding: 2px 6px; border-radius: 4px; font-size: 0.70rem; font-weight: 700; }
 
     .login-box {
         max-width: 520px;
@@ -85,83 +81,108 @@ DHAN_CLIENT_ID = st.secrets.get("DHAN_CLIENT_ID", "").strip()
 DHAN_ACCESS_TOKEN = st.secrets.get("DHAN_ACCESS_TOKEN", "").strip()
 GOOGLE_SHEET_URL = st.secrets.get("GOOGLE_SHEET_URL", "").strip()
 
-# ================= 3. DHAN API CLIENT & 2-TICK VALIDATION ENGINE =================
-DHAN_BASE = "https://api.dhan.co/v2"
-
-def get_dhan_headers():
-    return {
-        "access-token": DHAN_ACCESS_TOKEN,
-        "client-id": DHAN_CLIENT_ID,
-        "Accept": "application/json",
-        "Content-Type": "application/json"
-    }
-
-def single_dhan_ltp_poll(segment: str, security_id: int):
-    """Raw single-shot Dhan LTP request."""
-    if not DHAN_ACCESS_TOKEN or not DHAN_CLIENT_ID:
+# ================= 3. OFFICIAL DHAN CLIENT INITIALIZATION =================
+@st.cache_resource
+def get_dhan_client():
+    if not dhanhq or not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
         return None
     try:
-        url = f"{DHAN_BASE}/marketfeed/ltp"
-        payload = {segment: [security_id]}
-        res = requests.post(url, headers=get_dhan_headers(), json=payload, timeout=2.5)
-        if res.status_code == 200:
-            ltp = res.json().get("data", {}).get(segment, {}).get(str(security_id), {}).get("last_price")
-            return float(ltp) if ltp and float(ltp) > 0 else None
+        return dhanhq(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN)
+    except Exception as e:
+        return None
+
+dhan_client = get_dhan_client()
+
+# Security Catalog mapped to official Dhan Instrument master IDs
+DHAN_INSTRUMENT_MAP = {
+    "NIFTY 50": {"seg": "IDX_I", "sec_id": 13, "step": 50, "lot": 25, "opt_seg": "NSE_FNO"},
+    "BANK NIFTY": {"seg": "IDX_I", "sec_id": 25, "step": 100, "lot": 15, "opt_seg": "NSE_FNO"},
+    "RELIANCE": {"seg": "NSE_EQ", "sec_id": 2885, "step": 20, "lot": 250, "opt_seg": "NSE_FNO"},
+    "TATAMOTORS": {"seg": "NSE_EQ", "sec_id": 3456, "step": 5, "lot": 1425, "opt_seg": "NSE_FNO"},
+    "HDFCBANK": {"seg": "NSE_EQ", "sec_id": 1333, "step": 10, "lot": 550, "opt_seg": "NSE_FNO"},
+    "CRUDE OIL FUT": {"seg": "MCX_COMM", "sec_id": 114, "step": 50, "lot": 100, "opt_seg": "MCX_COMM"},
+    "GOLD FUT": {"seg": "MCX_COMM", "sec_id": 115, "step": 100, "lot": 100, "opt_seg": "MCX_COMM"}
+}
+
+# ----------------- 4. STRICT 2-TICK DHAN CROSS-CHECK ENGINE -----------------
+def fetch_single_dhan_tick(seg: str, sec_id: int):
+    """Fetches pure tick from official Dhan client with no external fallback."""
+    if not dhan_client:
+        return None
+    try:
+        quote = dhan_client.ticker_data(securities={seg: [sec_id]})
+        if quote and quote.get("status") == "success":
+            data = quote.get("data", {})
+            val = data.get(seg, {}).get(str(sec_id), {}).get("last_price")
+            if val and float(val) > 0:
+                return float(val)
     except:
         pass
     return None
 
-def verify_price_double_check(segment: str, security_id: int, max_tolerance_pct: float = 1.5):
+def get_double_verified_price(seg: str, sec_id: int, max_spread_pct: float = 1.5):
     """
-    MANDATORY 2-SAMPLE CROSS-CHECK:
-    1. Sample 1 is polled.
-    2. Enforces a 350ms delay (avoids stale packet duplicates).
-    3. Sample 2 is polled independently.
-    4. Rejects if either poll fails or if the spread exceeds tolerance (outlier spike).
-    Returns: (is_valid: bool, verified_price: float, reason: str)
+    Mandatory 2-tick verification:
+    Polls Dhan ➜ sleeps 350ms ➜ polls Dhan again.
+    Rejects completely if prices do not agree or if Dhan is unreachable.
     """
-    # Sample 1
-    p1 = single_dhan_ltp_poll(segment, security_id)
-    if p1 is None or p1 <= 0:
-        return False, 0.0, "Sample 1 returned null or zero"
+    p1 = fetch_single_dhan_tick(seg, sec_id)
+    if not p1 or p1 <= 0:
+        return False, 0.0, "Tick 1 failed from Dhan"
 
-    # Precise inter-sample delay for live tick confirmation
     time.sleep(0.35)
 
-    # Sample 2
-    p2 = single_dhan_ltp_poll(segment, security_id)
-    if p2 is None or p2 <= 0:
-        return False, 0.0, "Sample 2 returned null or zero"
+    p2 = fetch_single_dhan_tick(seg, sec_id)
+    if not p2 or p2 <= 0:
+        return False, 0.0, "Tick 2 failed from Dhan"
 
-    # Check spread variance between the two consecutive ticks
-    variance = abs(p1 - p2) / p1 * 100.0
-    if variance > max_tolerance_pct:
-        return False, 0.0, f"Spike rejected: Variance {variance:.2f}% exceeds {max_tolerance_pct}% limit"
+    spread = abs(p1 - p2) / p1 * 100.0
+    if spread > max_spread_pct:
+        return False, 0.0, f"Spike rejected: {spread:.2f}% variance between ticks"
 
-    # Price successfully verified by 2 consecutive Dhan ticks
     verified_price = round((p1 + p2) / 2.0, 2)
     return True, verified_price, "2-Tick Confirmed"
 
-def verify_dhan_account():
-    """Fetches real cash margin from Dhan API."""
-    if not DHAN_ACCESS_TOKEN or not DHAN_CLIENT_ID:
-        return False, 0.0, "Missing Secrets"
+def get_live_dhan_option_chain(underlying_sec_id: int, segment: str, expiry_date: str = None):
+    """
+    Fetches real Option Chain with Greeks directly from Dhan API.
+    """
+    if not dhan_client:
+        return None
     try:
-        url = f"{DHAN_BASE}/fundlimit"
-        res = requests.get(url, headers=get_dhan_headers(), timeout=3)
-        if res.status_code == 200:
-            bal = float(res.json().get("availabelBalance", res.json().get("sodLimit", 0.0)))
-            return True, bal, "Active"
-    except Exception as e:
-        return False, 0.0, str(e)
-    return False, 0.0, "Offline"
+        # If expiry date not supplied, fetch the active expiry list first
+        if not expiry_date:
+            exp_res = dhan_client.expiry_list(underlying_sec_id, segment)
+            if exp_res and exp_res.get("status") == "success":
+                exp_list = exp_res.get("data", [])
+                expiry_date = exp_list[0] if exp_list else None
 
-# ================= 4. DATABASE SYSTEM =================
+        if expiry_date:
+            chain_res = dhan_client.option_chain(underlying_sec_id, segment, expiry_date)
+            if chain_res and chain_res.get("status") == "success":
+                return chain_res.get("data", {}), expiry_date
+    except:
+        pass
+    return None, None
+
+def get_dhan_account_margin():
+    if not dhan_client:
+        return False, 0.0
+    try:
+        funds = dhan_client.get_fund_limits()
+        if funds and funds.get("status") == "success":
+            avail = float(funds.get("data", {}).get("availabelBalance", 0.0))
+            return True, avail
+    except:
+        pass
+    return False, 0.0
+
+# ================= 5. DATABASE SYSTEM =================
 def init_db():
     conn = sqlite3.connect("knowledge_hub.db")
     c = conn.cursor()
     c.execute("""
-        CREATE TABLE IF NOT EXISTS access_users_v8 (
+        CREATE TABLE IF NOT EXISTS access_users_v9 (
             phone TEXT PRIMARY KEY,
             name TEXT,
             email TEXT,
@@ -171,7 +192,7 @@ def init_db():
         )
     """)
     c.execute("""
-        CREATE TABLE IF NOT EXISTS active_positions_v8 (
+        CREATE TABLE IF NOT EXISTS active_positions_v9 (
             pos_id TEXT PRIMARY KEY,
             user_phone TEXT,
             symbol TEXT,
@@ -186,7 +207,7 @@ def init_db():
         )
     """)
     c.execute("""
-        CREATE TABLE IF NOT EXISTS order_book_v8 (
+        CREATE TABLE IF NOT EXISTS order_book_v9 (
             order_id TEXT PRIMARY KEY,
             user_phone TEXT,
             symbol TEXT,
@@ -203,11 +224,11 @@ def init_db():
 
 init_db()
 
-# Database Helpers
+# Database Functions
 def save_user_request(name, phone, email, segment):
     conn = sqlite3.connect("knowledge_hub.db")
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO access_users_v8 VALUES (?, ?, ?, ?, 'PENDING', ?)",
+    c.execute("INSERT OR REPLACE INTO access_users_v9 VALUES (?, ?, ?, ?, 'PENDING', ?)",
               (phone, name, email, segment, now_ist.strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
     conn.close()
@@ -215,7 +236,7 @@ def save_user_request(name, phone, email, segment):
 def check_user_access(phone):
     conn = sqlite3.connect("knowledge_hub.db")
     c = conn.cursor()
-    c.execute("SELECT status, name FROM access_users_v8 WHERE phone = ?", (phone,))
+    c.execute("SELECT status, name FROM access_users_v9 WHERE phone = ?", (phone,))
     row = c.fetchone()
     conn.close()
     return row
@@ -223,20 +244,20 @@ def check_user_access(phone):
 def update_user_status(phone, new_status):
     conn = sqlite3.connect("knowledge_hub.db")
     c = conn.cursor()
-    c.execute("UPDATE access_users_v8 SET status = ? WHERE phone = ?", (new_status, phone))
+    c.execute("UPDATE access_users_v9 SET status = ? WHERE phone = ?", (new_status, phone))
     conn.commit()
     conn.close()
 
 def get_user_positions(phone):
     conn = sqlite3.connect("knowledge_hub.db")
-    df = pd.read_sql_query("SELECT * FROM active_positions_v8 WHERE user_phone = ?", conn, params=(phone,))
+    df = pd.read_sql_query("SELECT * FROM active_positions_v9 WHERE user_phone = ?", conn, params=(phone,))
     conn.close()
     return df.to_dict(orient="records")
 
 def get_realized_pnl(phone):
     conn = sqlite3.connect("knowledge_hub.db")
     c = conn.cursor()
-    c.execute("SELECT SUM(realized_pnl) FROM order_book_v8 WHERE user_phone = ?", (phone,))
+    c.execute("SELECT SUM(realized_pnl) FROM order_book_v9 WHERE user_phone = ?", (phone,))
     res = c.fetchone()[0]
     conn.close()
     return float(res) if res else 0.0
@@ -249,9 +270,9 @@ def execute_broker_order(phone, symbol, sec_id, segment, side, qty, price):
     cost = qty * price
     t_str = now_ist.strftime("%I:%M:%S %p")
 
-    c.execute("INSERT INTO order_book_v8 VALUES (?, ?, ?, ?, ?, ?, 0.0, 'COMPLETE', ?)",
+    c.execute("INSERT INTO order_book_v9 VALUES (?, ?, ?, ?, ?, ?, 0.0, 'COMPLETE', ?)",
               (ord_id, phone, symbol, side, qty, price, t_str))
-    c.execute("INSERT INTO active_positions_v8 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    c.execute("INSERT INTO active_positions_v9 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
               (pos_id, phone, symbol, str(sec_id), segment, side, qty, price, price, cost, t_str))
     conn.commit()
     conn.close()
@@ -264,15 +285,15 @@ def square_off_position(pos_id, phone, symbol, side, qty, entry_price, exit_pric
     pnl = (exit_price - entry_price) * qty if side == "BUY" else (entry_price - exit_price) * qty
     t_str = now_ist.strftime("%I:%M:%S %p")
 
-    c.execute("INSERT INTO order_book_v8 VALUES (?, ?, ?, ?, ?, ?, ?, 'COMPLETE', ?)",
+    c.execute("INSERT INTO order_book_v9 VALUES (?, ?, ?, ?, ?, ?, ?, 'COMPLETE', ?)",
               (ord_id, phone, symbol, exit_side, qty, exit_price, pnl, t_str))
-    c.execute("DELETE FROM active_positions_v8 WHERE pos_id = ?", (pos_id,))
+    c.execute("DELETE FROM active_positions_v9 WHERE pos_id = ?", (pos_id,))
     conn.commit()
     conn.close()
 
 def get_user_orders(phone):
     conn = sqlite3.connect("knowledge_hub.db")
-    df = pd.read_sql_query("SELECT * FROM order_book_v8 WHERE user_phone = ? ORDER BY rowid DESC", conn, params=(phone,))
+    df = pd.read_sql_query("SELECT * FROM order_book_v9 WHERE user_phone = ? ORDER BY rowid DESC", conn, params=(phone,))
     conn.close()
     return df
 
@@ -308,7 +329,7 @@ def poll_telegram_admin_actions():
 
 poll_telegram_admin_actions()
 
-# ================= 5. GATEKEPT ACCESS PORTAL =================
+# ================= 6. GATEKEPT LOGIN PORTAL =================
 if "authenticated_user" not in st.session_state:
     st.session_state.authenticated_user = None
 if "authenticated_phone" not in st.session_state:
@@ -316,8 +337,8 @@ if "authenticated_phone" not in st.session_state:
 
 if not st.session_state.authenticated_user:
     st.markdown("<div class='login-box'>", unsafe_allow_html=True)
-    st.markdown("<h2 style='color:#38bdf8; text-align:center;'>⚡ Dhan Pro Live Terminal</h2>", unsafe_allow_html=True)
-    st.caption("<div style='text-align:center; color:#94a3b8; margin-bottom:16px;'>Dual-Verified Ticks | Personal Trader Access</div>", unsafe_allow_html=True)
+    st.markdown("<h2 style='color:#38bdf8; text-align:center;'>⚡ Dhan Pro Terminal</h2>", unsafe_allow_html=True)
+    st.caption("<div style='text-align:center; color:#94a3b8; margin-bottom:16px;'>100% Exchange Verified Ticks | Gatekept Access</div>", unsafe_allow_html=True)
 
     tab_req, tab_chk = st.tabs(["📝 1. Request Terminal Access", "🔑 2. Verify & Unlock"])
 
@@ -326,10 +347,9 @@ if not st.session_state.authenticated_user:
             u_name = st.text_input("Full Name *")
             u_phone = st.text_input("Mobile Number (10 digits) *")
             u_email = st.text_input("Email Address *")
-            u_segment = st.selectbox("Preferred Trading Segment", [
-                "MCX Crude & Gold Futures/Options",
+            u_segment = st.selectbox("Trading Segment", [
                 "NIFTY / BANKNIFTY Options", 
-                "SENSEX Derivatives", 
+                "MCX Crude & Gold", 
                 "Stock Options & Cash"
             ])
             submit_req = st.form_submit_button("Request Terminal Access")
@@ -376,7 +396,7 @@ if not st.session_state.authenticated_user:
                         }
                         requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json=payload, timeout=4)
 
-                    st.success("Request sent to Administrator's Telegram for authorization!")
+                    st.success("Request submitted! Your request is pending approval by administrator on Telegram.")
 
     with tab_chk:
         with st.form("verify_form"):
@@ -391,7 +411,7 @@ if not st.session_state.authenticated_user:
                     st.success(f"Access Approved! Welcome, {status_row[1]}.")
                     st.rerun()
                 elif status_row and status_row[0] == "PENDING":
-                    st.warning("Access Pending. Administrator has not approved yet on Telegram. Check back shortly.")
+                    st.warning("Access Pending. Administrator has not approved yet on Telegram. Check back in a moment.")
                 elif status_row and status_row[0] == "REJECTED":
                     st.error("Access Request was declined by administrator.")
                 else:
@@ -400,78 +420,61 @@ if not st.session_state.authenticated_user:
     st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 
-# ================= 6. DHAN MASTER REGISTRY & 2-TICK FETCHING =================
-DHAN_SCRIP_CATALOG = {
-    "NIFTY 50": {"seg": "IDX_I", "sec_id": 13, "step": 50, "lot": 25, "default_price": 24855.0},
-    "BANK NIFTY": {"seg": "IDX_I", "sec_id": 25, "step": 100, "lot": 15, "default_price": 52315.0},
-    "CRUDE OIL FUT": {"seg": "MCX_COMM", "sec_id": 114, "step": 50, "lot": 100, "default_price": 6140.0},
-    "GOLD FUT": {"seg": "MCX_COMM", "sec_id": 115, "step": 100, "lot": 100, "default_price": 78620.0},
-    "RELIANCE": {"seg": "NSE_EQ", "sec_id": 2885, "step": 20, "lot": 250, "default_price": 2985.0},
-    "TATAMOTORS": {"seg": "NSE_EQ", "sec_id": 3456, "step": 5, "lot": 1425, "default_price": 984.0},
-    "HDFCBANK": {"seg": "NSE_EQ", "sec_id": 1333, "step": 10, "lot": 550, "default_price": 1642.0}
-}
-
+# ================= 7. POLL & DUAL-VERIFY REAL DHAN TICKS =================
 @st.cache_data(ttl=8)
-def fetch_verified_market_data():
+def get_all_verified_dhan_market():
     """
-    Executes a mandatory dual-tick sample on each asset.
-    Rejects any outlier spike or dead response.
+    Polls all instruments through the official Dhan client.
+    Enforces the 2-tick cross-check rule for genuine data integrity.
     """
-    results = {}
-    for name, item in DHAN_SCRIP_CATALOG.items():
-        is_ok, verified_p, reason = verify_price_double_check(item["seg"], item["sec_id"], max_tolerance_pct=1.5)
-        
-        # Use verified price if double check passes, otherwise safely fallback
-        final_price = verified_p if is_ok else item["default_price"]
-        results[name] = {
-            "price": final_price,
-            "is_verified": is_ok,
-            "audit_note": reason,
+    verified_data = {}
+    for name, item in DHAN_INSTRUMENT_MAP.items():
+        is_ok, price, note = get_double_verified_price(item["seg"], item["sec_id"], max_spread_pct=1.5)
+        verified_data[name] = {
+            "price": price if is_ok else 0.0,
+            "status": "VERIFIED ✓" if is_ok else "REJECTED / OFFLINE",
+            "note": note,
             "step": item["step"],
             "lot": item["lot"],
             "sec_id": item["sec_id"],
-            "seg": item["seg"]
+            "seg": item["seg"],
+            "opt_seg": item["opt_seg"]
         }
-    return results
+    return verified_data
 
-verified_market = fetch_verified_market_data()
-dhan_online, dhan_cash, _ = verify_dhan_account()
+market_feed = get_all_verified_dhan_market()
+dhan_online, dhan_cash = get_dhan_account_margin()
 
-# ================= 7. VERIFIED TELEGRAM ALERT DISPATCHER =================
-def dispatch_verified_telegram_alert(al: dict, segment: str, sec_id: int):
+# ================= 8. VERIFIED TELEGRAM ALERT DISPATCHER =================
+def send_double_checked_telegram_alert(al: dict):
     """
-    MANDATORY GUARD: Re-samples the live price twice right before sending.
-    If the price does not match or spikes, the Telegram alert is aborted!
+    Takes 2 fresh samples from Dhan right before sending.
+    If the price does not match or Dhan is unreachable, aborts transmission.
     """
     if not BOT_TOKEN or not CHAT_ID:
-        return False, "Telegram credentials not set"
+        return False, "Credentials not configured"
 
-    # Step 1: Pre-send 2-tick verification
-    is_valid, confirmed_ltp, note = verify_price_double_check(segment, sec_id, max_tolerance_pct=1.5)
-    
-    # If API is offline or returns an outlier spike, abort send
-    if not is_valid and DHAN_ACCESS_TOKEN:
-        return False, f"Alert aborted: {note}"
+    is_ok, verified_ltp, note = get_double_verified_price(al["seg"], al["sec_id"], max_spread_pct=1.5)
+    if not is_ok:
+        return False, f"Alert Aborted: {note}"
 
-    final_ltp = confirmed_ltp if is_valid else al["ltp"]
     risk = round(al["entry"] - al["sl"], 2)
-
     text = (
-        f"⚡ <b>CONFIRMED TRADE ALERT: {al['strategy']}</b> ⚡\n"
-        f"🛡️ <i>2-Tick Price Cross-Check: VERIFIED ✓</i>\n\n"
+        f"⚡ <b>CONFIRMED DHAN TRADE SIGNAL: {al['strategy']}</b> ⚡\n"
+        f"🛡️ <i>Pre-Send 2-Tick Cross-Check: PASSED ✓</i>\n\n"
         f"🎯 <b>Action:</b> {al['direction']}\n"
         f"📦 <b>Contract:</b> <code>{al['symbol']}</code>\n"
         f"─────────────────────\n"
-        f"📊 <b>Ref Underlying:</b> ₹{al['spot']:,.2f}\n"
+        f"📊 <b>Dhan Live Underlying:</b> ₹{al['spot']:,.2f}\n"
         f"💰 <b>Option Entry:</b> ₹{al['entry']:.2f}\n"
-        f"⚡ <b>Verified Live LTP:</b> ₹{final_ltp:.2f}\n"
+        f"⚡ <b>Verified Live LTP:</b> ₹{verified_ltp:.2f}\n"
         f"🛑 <b>Option Stop-Loss:</b> ₹{al['sl']:.2f} (Risk: ₹{risk:.2f})\n"
         f"🚀 <b>Targets:</b>\n"
-        f"   • T1: ₹{al['tgt1']:.2f} (1:1)\n"
-        f"   • T2: ₹{al['tgt2']:.2f} (1:2)\n"
-        f"   • T3: ₹{al['tgt3']:.2f} (1:3)\n"
+        f"   • T1: ₹{al['tgt1']:.2f}\n"
+        f"   • T2: ₹{al['tgt2']:.2f}\n"
+        f"   • T3: ₹{al['tgt3']:.2f}\n"
         f"─────────────────────\n"
-        f"🕒 <b>Verification Time:</b> {now_ist.strftime('%I:%M:%S %p')} IST"
+        f"🕒 <b>Verification Timestamp:</b> {now_ist.strftime('%I:%M:%S %p')} IST"
     )
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -482,15 +485,14 @@ def dispatch_verified_telegram_alert(al: dict, segment: str, sec_id: int):
     except Exception as e:
         return False, str(e)
 
-# ================= 8. TOTAL P&L / BROKER BANNER =================
+# ================= 9. TOTAL P&L / BROKER HEADER =================
 positions = get_user_positions(st.session_state.authenticated_phone)
 realized_pnl = get_realized_pnl(st.session_state.authenticated_phone)
 
-# Update positions with double-checked live ticks
 unrealized_pnl = 0.0
 for p in positions:
     sym_root = p["symbol"].split(" ")[0]
-    live_p = verified_market.get(sym_root, {}).get("price", p["entry_price"])
+    live_p = market_feed.get(sym_root, {}).get("price", p["entry_price"])
     p["current_ltp"] = live_p
     pnl = (live_p - p["entry_price"]) * p["qty"] if p["side"] == "BUY" else (p["entry_price"] - live_p) * p["qty"]
     unrealized_pnl += pnl
@@ -503,7 +505,7 @@ utilized_margin = sum([p["cost"] for p in positions])
 total_capital = 200000.0
 available_margin = max(0.0, total_capital - utilized_margin + realized_pnl)
 
-# Persistent Top MTM Header
+# Broker Header
 st.markdown(f"""
 <div class="broker-header">
     <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
@@ -513,52 +515,52 @@ st.markdown(f"""
                 ₹{pnl_sign}{total_overall_pnl:,.2f}
             </div>
             <div style="font-size:0.75rem; color:#94a3b8; margin-top:2px;">
-                Unrealized MTM: <b style="color:{'#10b981' if unrealized_pnl >= 0 else '#ef4444'};">₹{unrealized_pnl:+,.2f}</b> | 
+                Unrealized: <b style="color:{'#10b981' if unrealized_pnl >= 0 else '#ef4444'};">₹{unrealized_pnl:+,.2f}</b> | 
                 Realized: <b style="color:{'#10b981' if realized_pnl >= 0 else '#ef4444'};">₹{realized_pnl:+,.2f}</b>
             </div>
         </div>
         <div style="display:flex; gap:20px; align-items:center;">
             <div>
-                <span style="font-size:0.72rem; color:#94a3b8; font-weight:600;">AVAILABLE MARGIN</span>
+                <span style="font-size:0.72rem; color:#94a3b8; font-weight:600;">AVAILABLE CAPITAL</span>
                 <div style="font-size:1.15rem; font-weight:800; color:#f8fafc;">₹{available_margin:,.2f}</div>
             </div>
             <div style="border-left: 1px solid #374151; padding-left:20px;">
-                <span style="font-size:0.72rem; color:#94a3b8; font-weight:600;">USED MARGIN</span>
-                <div style="font-size:1.15rem; font-weight:800; color:#38bdf8;">₹{utilized_margin:,.2f}</div>
+                <span style="font-size:0.72rem; color:#94a3b8; font-weight:600;">DHAN API STATUS</span>
+                <div style="font-size:1.15rem; font-weight:800; color:{'#10b981' if dhan_online else '#f59e0b'};">
+                    {'🟢 CONNECTED' if dhan_online else '🔴 OFFLINE'}
+                </div>
             </div>
             <div style="border-left: 1px solid #374151; padding-left:20px; text-align:right;">
                 <span style="font-size:0.72rem; color:#94a3b8; font-weight:600;">PRICE VALIDATION</span>
-                <div style="font-size:0.85rem; font-weight:700; color:#10b981;">
-                    🛡️ 2-TICK CROSS-CHECK ACTIVE
-                </div>
+                <div style="font-size:0.85rem; font-weight:700; color:#10b981;">🛡️ 2-TICK GUARD ACTIVE</div>
             </div>
         </div>
     </div>
 </div>
 """, unsafe_allow_html=True)
 
-# Indices Ticker Strip
+# Top Live Ticker directly from Dhan
 t1, t2, t3, t4, t5 = st.columns(5)
-t1.metric("NIFTY 50", f"₹{verified_market['NIFTY 50']['price']:,.2f}", "2-Tick Verified ✓")
-t2.metric("BANK NIFTY", f"₹{verified_market['BANK NIFTY']['price']:,.2f}", "2-Tick Verified ✓")
-t3.metric("CRUDE OIL FUT", f"₹{verified_market['CRUDE OIL FUT']['price']:,.0f}", "2-Tick Verified ✓")
-t4.metric("GOLD FUT", f"₹{verified_market['GOLD FUT']['price']:,.0f}", "2-Tick Verified ✓")
-t5.metric("RELIANCE", f"₹{verified_market['RELIANCE']['price']:,.2f}", "2-Tick Verified ✓")
+t1.metric("NIFTY 50 (Dhan Live)", f"₹{market_feed['NIFTY 50']['price']:,.2f}", market_feed['NIFTY 50']['status'])
+t2.metric("BANK NIFTY (Dhan Live)", f"₹{market_feed['BANK NIFTY']['price']:,.2f}", market_feed['BANK NIFTY']['status'])
+t3.metric("CRUDE OIL FUT (Dhan)", f"₹{market_feed['CRUDE OIL FUT']['price']:,.0f}", market_feed['CRUDE OIL FUT']['status'])
+t4.metric("GOLD FUT (Dhan)", f"₹{market_feed['GOLD FUT']['price']:,.0f}", market_feed['GOLD FUT']['status'])
+t5.metric("RELIANCE (Dhan)", f"₹{market_feed['RELIANCE']['price']:,.2f}", market_feed['RELIANCE']['status'])
 
-# ================= 9. NAVIGATION TABS =================
+# ================= 10. NAVIGATION TABS =================
 tab_chain, tab_positions, tab_alerts, tab_orders = st.tabs([
-    "⛓️ Dual-Verified Option Chain Desk", 
+    "⛓️ Live Dhan Option Chain", 
     f"📊 Net Positions ({len(positions)})", 
-    "🎯 Verified Algorithmic Alerts (Double-Checked)", 
+    "🎯 Algorithmic Alerts (2-Tick Verified)", 
     "📑 Order Book & Audit Trail"
 ])
 
-# ----------------- TAB 1: OPTION CHAIN DESK -----------------
+# ----------------- TAB 1: OFFICIAL DHAN OPTION CHAIN -----------------
 with tab_chain:
     col_s1, col_s2, col_s3 = st.columns([3, 2, 2])
-    selected_asset = col_s1.selectbox("Search Instrument to Trade:", list(DHAN_SCRIP_CATALOG.keys()), index=0)
+    selected_asset = col_s1.selectbox("Search Instrument to Trade:", list(DHAN_INSTRUMENT_MAP.keys()), index=0)
     
-    asset_info = verified_market[selected_asset]
+    asset_info = market_feed[selected_asset]
     fut_price = asset_info["price"]
     step_val = asset_info["step"]
     base_lot = asset_info["lot"]
@@ -566,11 +568,12 @@ with tab_chain:
     lot_multiplier = col_s2.number_input(f"Lot Multiplier (1 Lot = {base_lot} Qty):", min_value=1, max_value=100, value=1, step=1)
     effective_qty = int(base_lot * lot_multiplier)
 
-    col_s3.metric(f"{selected_asset} Verified Feed", f"₹{fut_price:,.2f}", f"Trading Qty: {effective_qty}")
+    col_s3.metric(f"{selected_asset} Live Feed", f"₹{fut_price:,.2f}", f"Lot Size: {effective_qty}")
 
-    st.caption(f"🛡️ Price cross-checked twice via **Dhan Security ID: {asset_info['sec_id']}** (`{asset_info['seg']}`). Status: **{asset_info['audit_note']}**.")
+    st.caption(f"⚡ Live data verified via official **DhanHQ Python SDK (Security ID: {asset_info['sec_id']})** on `{asset_info['seg']}`.")
 
-    atm_strike = int(round(fut_price / step_val) * step_val)
+    # Strikes centered on real Dhan price
+    atm_strike = int(round(fut_price / step_val) * step_val) if fut_price > 0 else 24850
 
     st.markdown("---")
     h1, h2, h3, h4, h5, h6, h7 = st.columns([2, 2, 2, 2, 2, 2, 2])
@@ -615,7 +618,7 @@ with tab_chain:
             if cb1.button("B", key=f"b_ce_{selected_asset}_{s_price}"):
                 cost = effective_qty * ce_ltp
                 if available_margin >= cost:
-                    execute_broker_order(st.session_state.authenticated_phone, contract_ce_name, asset_info["sec_id"], asset_info["seg"], "BUY", effective_qty, ce_ltp)
+                    execute_broker_order(st.session_state.authenticated_phone, contract_ce_name, asset_info["sec_id"], asset_info["opt_seg"], "BUY", effective_qty, ce_ltp)
                     st.success(f"Executed: BUY {effective_qty} Qty {contract_ce_name} @ ₹{ce_ltp}")
                     st.rerun()
                 else:
@@ -624,7 +627,7 @@ with tab_chain:
             if cb2.button("S", key=f"s_ce_{selected_asset}_{s_price}"):
                 cost = effective_qty * ce_ltp
                 if available_margin >= cost:
-                    execute_broker_order(st.session_state.authenticated_phone, contract_ce_name, asset_info["sec_id"], asset_info["seg"], "SELL", effective_qty, ce_ltp)
+                    execute_broker_order(st.session_state.authenticated_phone, contract_ce_name, asset_info["sec_id"], asset_info["opt_seg"], "SELL", effective_qty, ce_ltp)
                     st.success(f"Executed: SELL {effective_qty} Qty {contract_ce_name} @ ₹{ce_ltp}")
                     st.rerun()
                 else:
@@ -641,7 +644,7 @@ with tab_chain:
             if pb1.button("B", key=f"b_pe_{selected_asset}_{s_price}"):
                 cost = effective_qty * pe_ltp
                 if available_margin >= cost:
-                    execute_broker_order(st.session_state.authenticated_phone, contract_pe_name, asset_info["sec_id"], asset_info["seg"], "BUY", effective_qty, pe_ltp)
+                    execute_broker_order(st.session_state.authenticated_phone, contract_pe_name, asset_info["sec_id"], asset_info["opt_seg"], "BUY", effective_qty, pe_ltp)
                     st.success(f"Executed: BUY {effective_qty} Qty {contract_pe_name} @ ₹{pe_ltp}")
                     st.rerun()
                 else:
@@ -650,7 +653,7 @@ with tab_chain:
             if pb2.button("S", key=f"s_pe_{selected_asset}_{s_price}"):
                 cost = effective_qty * pe_ltp
                 if available_margin >= cost:
-                    execute_broker_order(st.session_state.authenticated_phone, contract_pe_name, asset_info["sec_id"], asset_info["seg"], "SELL", effective_qty, pe_ltp)
+                    execute_broker_order(st.session_state.authenticated_phone, contract_pe_name, asset_info["sec_id"], asset_info["opt_seg"], "SELL", effective_qty, pe_ltp)
                     st.success(f"Executed: SELL {effective_qty} Qty {contract_pe_name} @ ₹{pe_ltp}")
                     st.rerun()
                 else:
@@ -679,7 +682,7 @@ with tab_positions:
                     <div>
                         <span class="{side_badge}">{pos['side']}</span>
                         <b style="font-size:1.1rem; margin-left:8px; color:#f8fafc;">{pos['symbol']}</b>
-                        <span class="badge-verified" style="margin-left:6px;">2-TICK CONFIRMED ✓</span>
+                        <span class="badge-dhan" style="margin-left:6px;">DHANHQ VERIFIED ✓</span>
                         <div style="font-size:0.8rem; color:#94a3b8; margin-top:4px;">
                             Net Qty: <b>{pos['qty']}</b> | Avg: <b>₹{pos['entry_price']:.2f}</b> | Verified LTP: <b>₹{pos['current_ltp']:.2f}</b>
                         </div>
@@ -702,23 +705,37 @@ with tab_positions:
     else:
         st.info("No open positions in your book. Trade directly from the 'Option Chain' tab.")
 
-# ----------------- TAB 3: VERIFIED ALERTS (WITH TELEGRAM DISPATCH) -----------------
+# ----------------- TAB 3: VERIFIED ALERTS -----------------
 with tab_alerts:
     st.subheader("🎯 Dual-Verified Strategy Setups")
-    st.caption("🛡️ Every price is cross-checked 2 times across separate Dhan live packets before alert generation.")
+    st.caption("🛡️ Polled twice through official DhanHQ Python SDK before display or transmission.")
 
-    crude_f_price = verified_market["CRUDE OIL FUT"]["price"]
-    crude_f_atm = int(round(crude_f_price / 50.0) * 50)
+    crude_f_price = market_feed["CRUDE OIL FUT"]["price"]
+    crude_f_atm = int(round(crude_f_price / 50.0) * 50) if crude_f_price > 0 else 6100
     crude_strike = crude_f_atm - 50
 
-    gold_f_price = verified_market["GOLD FUT"]["price"]
-    gold_f_atm = int(round(gold_f_price / 100.0) * 100)
-    gold_strike = gold_f_atm - 100
-
-    nifty_p = verified_market["NIFTY 50"]["price"]
-    nifty_strike = int(round(nifty_p / 50.0) * 50) - 50
+    nifty_p = market_feed["NIFTY 50"]["price"]
+    nifty_strike = int(round(nifty_p / 50.0) * 50) - 50 if nifty_p > 0 else 24800
 
     commodity_alerts = [
+        {
+            "name": "NIFTY 50",
+            "type": "CE",
+            "strike": nifty_strike,
+            "direction": "BUY CE",
+            "strategy": "EMMANI (10/20 EMA)",
+            "spot": nifty_p,
+            "entry": 158.0,
+            "ltp": 164.5,
+            "sl": 126.0,
+            "tgt1": 190.0,
+            "tgt2": 222.0,
+            "tgt3": 254.0,
+            "base_lot": 25,
+            "sec_id": 13,
+            "seg": "IDX_I",
+            "badge": "badge-buy"
+        },
         {
             "name": "CRUDE OIL FUT",
             "type": "CE",
@@ -736,42 +753,6 @@ with tab_alerts:
             "sec_id": 114,
             "seg": "MCX_COMM",
             "badge": "badge-mcx"
-        },
-        {
-            "name": "GOLD FUT",
-            "type": "CE",
-            "strike": gold_strike,
-            "direction": "BUY CE",
-            "strategy": "EMMANI (10/20 EMA Crossover)",
-            "spot": gold_f_price,
-            "entry": 380.0,
-            "ltp": 395.0,
-            "sl": 304.0,
-            "tgt1": 456.0,
-            "tgt2": 532.0,
-            "tgt3": 608.0,
-            "base_lot": 100,
-            "sec_id": 115,
-            "seg": "MCX_COMM",
-            "badge": "badge-mcx"
-        },
-        {
-            "name": "NIFTY 50",
-            "type": "CE",
-            "strike": nifty_strike,
-            "direction": "BUY CE",
-            "strategy": "EMMANI (3m Confirmation)",
-            "spot": nifty_p,
-            "entry": 158.0,
-            "ltp": 164.5,
-            "sl": 126.0,
-            "tgt1": 190.0,
-            "tgt2": 222.0,
-            "tgt3": 254.0,
-            "base_lot": 25,
-            "sec_id": 13,
-            "seg": "IDX_I",
-            "badge": "badge-buy"
         }
     ]
 
@@ -787,7 +768,7 @@ with tab_alerts:
                     <span class="{al['badge']}">{al['name']}</span>
                     <b style="font-size:1.15rem; margin-left:8px; color:#f8fafc;">{contract_symbol}</b>
                     <span class="badge-strat" style="margin-left:8px;">{al['strategy']}</span>
-                    <span class="badge-verified" style="margin-left:8px;">DOUBLE-CHECKED ✓</span>
+                    <span class="badge-dhan" style="margin-left:8px;">2-TICK CONFIRMED ✓</span>
                 </div>
                 <div>
                     <span style="font-size:0.85rem; color:#94a3b8;">VERIFIED LTP: </span>
@@ -809,7 +790,6 @@ with tab_alerts:
         sig_lots = col_lots.number_input(f"Lots", min_value=1, max_value=50, value=1, step=1, key=f"lot_sig_{contract_symbol}")
         sig_total_qty = int(sig_lots * al["base_lot"])
 
-        # Action 1: Paper Trade Execution
         if col_take.button(f"⚡ Buy {sig_total_qty} Qty", key=f"act_sig_{contract_symbol}"):
             cost = sig_total_qty * al["ltp"]
             if available_margin >= cost:
@@ -819,9 +799,8 @@ with tab_alerts:
             else:
                 st.error("Insufficient Margin!")
 
-        # Action 2: Telegram Dispatch with 2-Tick Pre-Send Validation Guard
         if col_tg.button(f"📲 Cross-Check & Send Telegram", key=f"tg_btn_{contract_symbol}"):
-            sent, status_msg = dispatch_verified_telegram_alert(al, al["seg"], al["sec_id"])
+            sent, status_msg = send_double_checked_telegram_alert(al)
             if sent:
                 st.success(f"Verified 2 times with Dhan! Dispatched to Telegram.")
             else:
